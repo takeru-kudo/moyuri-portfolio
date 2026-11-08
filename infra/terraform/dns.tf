@@ -8,6 +8,16 @@ resource "cloudflare_dns_record" "mx_null" {
   ttl      = 1
 }
 
+# Proxied placeholder address for the www host; requests are answered by the redirect rule.
+resource "cloudflare_dns_record" "www" {
+  zone_id = var.zone_id
+  name    = "www.${local.zone_name}"
+  type    = "AAAA"
+  content = "100::"
+  proxied = true
+  ttl     = 1
+}
+
 # TXT content is stored with surrounding double quotes.
 resource "cloudflare_dns_record" "spf" {
   zone_id = var.zone_id
