@@ -31,6 +31,38 @@ variable "notification_email" {
   }
 }
 
+variable "developer_email" {
+  description = "Developer email address allowed by the Beta Access policy."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.developer_email))
+    error_message = "developer_email must be a non-empty email address."
+  }
+
+  validation {
+    condition     = var.developer_email == lower(var.developer_email)
+    error_message = "developer_email must be lowercase."
+  }
+}
+
+variable "editor_email" {
+  description = "Editor email address allowed by the Beta Access policy."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.editor_email))
+    error_message = "editor_email must be a non-empty email address."
+  }
+
+  validation {
+    condition     = var.editor_email == lower(var.editor_email)
+    error_message = "editor_email must be lowercase."
+  }
+}
+
 locals {
   zone_name = "moyuri-kudo.com"
 }
