@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      TF_IN_AUTOMATION: "1"
+      TERRAFORM_VERSION: 1.17.1
+      TERRAFORM_SHA256: 4638628058e71a55212b1c563712eac03b902128f40740f3dc8174df12135061
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Terraform
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          zip="terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$zip" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${zip}"
+          printf '%s  %s\n' "$TERRAFORM_SHA256" "$zip" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/terraform-bin"
+          unzip -o -q "$zip" terraform -d "$RUNNER_TEMP/terraform-bin"
+          printf '%s\n' "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -no-color
+
+      - name: terraform init
+        run: terraform init -backend=false -input=false -no-color -lockfile=readonly
+
+      - name: terraform validate
+        run: terraform validate -no-color

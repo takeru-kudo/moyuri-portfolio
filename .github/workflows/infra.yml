@@ -1,0 +1,108 @@
+name: infra
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: infra
+    permissions:
+      contents: read
+    env:
+      TF_IN_AUTOMATION: "1"
+      TERRAFORM_VERSION: 1.17.1
+      TERRAFORM_SHA256: 4638628058e71a55212b1c563712eac03b902128f40740f3dc8174df12135061
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Terraform
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          zip="terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$zip" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${zip}"
+          printf '%s  %s\n' "$TERRAFORM_SHA256" "$zip" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/terraform-bin"
+          unzip -o -q "$zip" terraform -d "$RUNNER_TEMP/terraform-bin"
+          printf '%s\n' "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
+
+      - name: terraform init
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -lockfile=readonly \
+            -backend-config="endpoints={s3=\"https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com\"}"
+
+      - name: terraform plan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TF_VAR_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
+        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/infra.tfplan"
+
+      - name: Destroy guard
+        run: |
+          set -euo pipefail
+          deletes="$(terraform show -json -no-color "$RUNNER_TEMP/infra.tfplan" \
+            | jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "\(.address) \(.change.actions | join(","))"')"
+          if [ -n "$deletes" ]; then
+            echo "::error::The plan deletes or replaces resources:"
+            printf '%s\n' "$deletes"
+            exit 1
+          fi
+          echo "No delete actions in the plan."
+
+      - name: terraform apply
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform apply -input=false -no-color "$RUNNER_TEMP/infra.tfplan"
+
+  report-failure:
+    needs: [apply]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create or comment on incident issue
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="Workflow \`${GITHUB_WORKFLOW}\` failed: ${run_url}"
+          gh label create incident --color B60205 --description "Automated failure report" 2>/dev/null || true
+          number="$(gh issue list --label incident --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Workflow failure: ${GITHUB_WORKFLOW}" --label incident --body "$body"
+          fi
