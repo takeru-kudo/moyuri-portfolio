@@ -44,3 +44,111 @@ jobs:
 
       - name: terraform validate
         run: terraform validate -no-color
+
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PNPM_VERSION: 12.17.0
+      PNPM_SHA256: 2c58959fd5df5cb9f4e72784c08a60ffc7ee558fed9b04b22254e29112203a51
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pnpm-bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/pnpm-bin"
+          printf '%s\n' "$RUNNER_TEMP/pnpm-bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: astro check
+        run: pnpm --filter @portfolio/site run check
+
+      - name: Build site
+        run: pnpm --filter @portfolio/site run build
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      ZIZMOR_VERSION: 1.32.0
+      ZIZMOR_SHA256: bb110cc765eca9cd7efb2e284a956be5974c60027b0970f16397d86208a9957b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint and zizmor
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lint-bin"
+          al="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$al" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${al}"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$al" | sha256sum --check --strict
+          tar -xzf "$al" -C "$RUNNER_TEMP/lint-bin" actionlint
+          zz="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$zz" "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/${zz}"
+          printf '%s  %s\n' "$ZIZMOR_SHA256" "$zz" | sha256sum --check --strict
+          tar -xzf "$zz" -C "$RUNNER_TEMP/lint-bin" zizmor
+          printf '%s\n' "$RUNNER_TEMP/lint-bin" >> "$GITHUB_PATH"
+
+      - name: actionlint
+        run: actionlint -color=false
+
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --no-progress --format=github .github/workflows
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+
+  tools-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Deployer tests
+        run: node --test tools/deployer/smoke.test.mjs
