@@ -1,0 +1,126 @@
+name: monitor
+
+on:
+  schedule:
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: monitor
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Run monitor checks
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          MONITOR_GITHUB_TOKEN: ${{ secrets.MONITOR_GITHUB_TOKEN }}
+          MONITOR_REQUIRE_CREDENTIALS: "1"
+        run: node tools/monitor/run.mjs
+
+  deps-scan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PNPM_VERSION: 12.17.0
+      PNPM_SHA256: 2c58959fd5df5cb9f4e72784c08a60ffc7ee558fed9b04b22254e29112203a51
+      OSV_SCANNER_VERSION: 2.7.1
+      OSV_SCANNER_SHA256: fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm and OSV-Scanner
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/scan-bin"
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/scan-bin"
+          osv="osv-scanner_linux_amd64"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$osv" "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/${osv}"
+          printf '%s  %s\n' "$OSV_SCANNER_SHA256" "$osv" | sha256sum --check --strict
+          install -m 0755 "$osv" "$RUNNER_TEMP/scan-bin/osv-scanner"
+          printf '%s\n' "$RUNNER_TEMP/scan-bin" >> "$GITHUB_PATH"
+
+      - name: OSV-Scanner
+        run: |
+          set -uo pipefail
+          set +e
+          osv-scanner scan source --recursive --format json --output-file "$RUNNER_TEMP/osv.json" .
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "::error::osv-scanner exited with $rc"
+            exit "$rc"
+          fi
+          node tools/monitor/osv-high.mjs "$RUNNER_TEMP/osv.json"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm audit (workspace)
+        run: pnpm audit --audit-level high
+
+      - name: pnpm audit (tools/deployer)
+        working-directory: tools/deployer
+        run: pnpm audit --audit-level high
+
+  report-failure:
+    needs: [checks, deps-scan]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create or comment on incident issue
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="Workflow \`${GITHUB_WORKFLOW}\` failed or was cancelled: ${run_url}"
+          gh label create incident --color B60205 --description "Automated failure report" 2>/dev/null || true
+          number="$(gh issue list --label incident --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Workflow failure: ${GITHUB_WORKFLOW}" --label incident --body "$body"
+          fi
