@@ -313,7 +313,10 @@ describe("dispatch", () => {
     mockGitHub();
     const logSpy = vi.spyOn(console, "log");
     const errorSpy = vi.spyOn(console, "error");
-    const payload = webhookBody("projects", "abc123", null, ["PUBLISH"]).replace("}", ',"title":"SensitiveTitle"}');
+    const payload = JSON.stringify({
+      ...JSON.parse(webhookBody("projects", "abc123", null, ["PUBLISH"])),
+      title: "SensitiveTitle",
+    });
     const signature = await sign(payload);
     await send(await signedRequest(payload, signature));
     const logged = [...logSpy.mock.calls, ...errorSpy.mock.calls].map((c) => c.map(String).join(" ")).join("\n");
