@@ -3,6 +3,7 @@ import type { GetStaticPaths } from "astro";
 import type { Project } from "@portfolio/content-schema";
 import Base from "../../layouts/Base.astro";
 import { getSiteContent } from "../../lib/load.ts";
+import { sanitizeRichText } from "../../lib/sanitize.ts";
 
 interface Props {
   project: Project;
@@ -15,7 +16,8 @@ export const getStaticPaths = (async () => {
 
 const { project } = Astro.props;
 const summary = project.summary?.trim() || null;
-const body = project.body?.trim() || null;
+const rawBody = project.body?.trim();
+const body = rawBody ? sanitizeRichText(rawBody).trim() || null : null;
 ---
 
 <Base title={`${project.title} | Moyuri Kudo`}>

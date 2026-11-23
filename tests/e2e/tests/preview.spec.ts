@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { request } from "@playwright/test";
+import { CSP_HEADER, GLOBAL_HEADERS, PATH_HEADERS, diffCsp } from "@portfolio/security-headers";
 import { expect, test } from "../src/fixtures.js";
 import { expectedVersion, previewHost, previewOrigin } from "../src/env.js";
 
@@ -33,13 +34,40 @@ test("version marker matches this run", async ({ preview }) => {
   expect(matches, "version.txt matches the expected version").toBe(true);
 });
 
-test("security headers are set", async ({ preview }) => {
+test("security headers match the definition", async ({ preview }) => {
   const response = await preview.get("/");
   expect(response.status(), "status").toBe(200);
   const headers = response.headers();
-  expect(headers["x-content-type-options"], "X-Content-Type-Options").toBe("nosniff");
+  for (const [name, value] of GLOBAL_HEADERS) {
+    if (name === "X-Robots-Tag") continue;
+    expect(headers[name.toLowerCase()], name).toBe(value);
+  }
   const robots = (headers["x-robots-tag"] ?? "").split(",").map((token) => token.trim());
   expect(robots, "X-Robots-Tag").toContain("noindex");
+  const csp = headers[CSP_HEADER.toLowerCase()];
+  expect(csp, CSP_HEADER).toBeDefined();
+  expect(diffCsp(csp ?? ""), "CSP differences from the definition").toEqual([]);
+  expect(headers["content-security-policy"], "enforcing CSP").toBeUndefined();
+});
+
+test("version marker is not cached", async ({ preview }) => {
+  const response = await preview.get("/version.txt");
+  expect(response.status(), "status").toBe(200);
+  const expected = PATH_HEADERS.find(([path]) => path === "/version.txt")?.[1] ?? [];
+  expect(expected.length, "headers defined for /version.txt").toBeGreaterThan(0);
+  for (const [name, value] of expected) {
+    expect(response.headers()[name.toLowerCase()], name).toBe(value);
+  }
+});
+
+test("security.txt is served", async ({ preview }) => {
+  const response = await preview.get("/.well-known/security.txt");
+  expect(response.status(), "status").toBe(200);
+  const lines = (await response.text()).split("\n");
+  expect(lines, "Contact").toContain(
+    "Contact: https://github.com/takeru-kudo/moyuri-portfolio/security/advisories/new",
+  );
+  expect(lines.some((line) => line.startsWith("Expires: ")), "Expires").toBe(true);
 });
 
 test.describe("top page", () => {

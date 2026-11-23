@@ -15,6 +15,8 @@ export const EXIT_HSTS_ONLY = 3;
 export const DEFAULT_BASE_URL = "https://moyuri-kudo.com";
 export const EXPECTED_TEXT = "Moyuri Kudo";
 export const HSTS_MIN_MAX_AGE = 300;
+export const CSP_HEADER = "content-security-policy-report-only";
+export const CSP_REQUIRED_DIRECTIVE = "default-src 'none'";
 export const POLL_INTERVAL_MS = 10_000;
 export const POLL_TIMEOUT_MS = 5 * 60_000;
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -94,6 +96,14 @@ export function checkHeaders(headers) {
     failures.push({
       kind: "header",
       message: `X-Content-Type-Options is ${describeValue(nosniff)}, expected "nosniff"`,
+    });
+  }
+  const csp = headers.get(CSP_HEADER);
+  const directives = (csp ?? "").split(";").map((d) => d.trim().replace(/\s+/g, " ").toLowerCase());
+  if (!directives.includes(CSP_REQUIRED_DIRECTIVE)) {
+    failures.push({
+      kind: "header",
+      message: `${CSP_HEADER} is ${describeValue(csp)}, expected a policy with "${CSP_REQUIRED_DIRECTIVE}"`,
     });
   }
   const hsts = headers.get("strict-transport-security");

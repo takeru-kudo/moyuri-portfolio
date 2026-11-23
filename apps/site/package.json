@@ -11,11 +11,14 @@
   },
   "dependencies": {
     "@portfolio/content-schema": "workspace:*",
-    "astro": "7.4.7"
+    "@portfolio/security-headers": "workspace:*",
+    "astro": "7.4.7",
+    "sanitize-html": "2.18.2"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",
     "@types/node": "26.6.6",
+    "@types/sanitize-html": "2.16.2",
     "typescript": "6.0.3"
   }
 }
