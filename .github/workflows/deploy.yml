@@ -191,6 +191,7 @@ jobs:
       contents: read
     outputs:
       version-id: ${{ steps.upload.outputs.version-id }}
+      preview-url: ${{ steps.upload.outputs.preview-url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -231,8 +232,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-upload.ndjson
+          WORKERS_SUBDOMAIN: ${{ vars.WORKERS_SUBDOMAIN }}
         run: |
           set -euo pipefail
+          if ! printf '%s' "$WORKERS_SUBDOMAIN" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?'; then
+            echo "::error::WORKERS_SUBDOMAIN is missing or invalid"
+            exit 1
+          fi
           pnpm --dir tools/deployer exec wrangler versions upload \
             --env prod --config ../../apps/site/wrangler.jsonc \
             --message "${GITHUB_SHA}-${GITHUB_RUN_ID}" < /dev/null
@@ -243,9 +249,113 @@ jobs:
           fi
           printf 'Uploaded prod version: %s\n' "$version_id"
           printf 'version-id=%s\n' "$version_id" >> "$GITHUB_OUTPUT"
+          preview_url="$(jq -r 'select(.type == "version-upload") | .preview_url // empty' "$WRANGLER_OUTPUT_FILE_PATH" | tail -n 1)"
+          if [ -z "$preview_url" ]; then
+            echo "::error::No preview URL in the wrangler output; preview URLs are disabled for site-prod"
+            exit 1
+          fi
+          expected_url="https://${version_id:0:8}-site-prod.${WORKERS_SUBDOMAIN}.workers.dev"
+          if [ "$preview_url" != "$expected_url" ]; then
+            echo "::error::The preview URL in the wrangler output does not match the uploaded version"
+            exit 1
+          fi
+          printf 'Preview URL: %s\n' "$preview_url"
+          printf 'preview-url=%s\n' "$preview_url" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: [upload-prod]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: e2e
+    permissions:
+      contents: read
+    steps:
+      - name: Validate preview URL
+        env:
+          PREVIEW_URL: ${{ needs.upload-prod.outputs.preview-url }}
+          VERSION_ID: ${{ needs.upload-prod.outputs.version-id }}
+          WORKERS_SUBDOMAIN: ${{ vars.WORKERS_SUBDOMAIN }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$WORKERS_SUBDOMAIN" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?'; then
+            echo "::error::WORKERS_SUBDOMAIN is missing or invalid"
+            exit 1
+          fi
+          if ! printf '%s' "$VERSION_ID" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'; then
+            echo "::error::upload-prod did not provide a valid version ID"
+            exit 1
+          fi
+          if [ "$PREVIEW_URL" != "https://${VERSION_ID:0:8}-site-prod.${WORKERS_SUBDOMAIN}.workers.dev" ]; then
+            echo "::error::upload-prod did not provide the preview URL of the uploaded version"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pnpm-bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/pnpm-bin"
+          printf '%s\n' "$RUNNER_TEMP/pnpm-bin" >> "$GITHUB_PATH"
+
+      - name: Check Google Chrome
+        run: |
+          set -euo pipefail
+          if [ ! -x /opt/google/chrome/chrome ]; then
+            echo "::error::Google Chrome is not installed on the runner"
+            exit 1
+          fi
+          google-chrome --version
+
+      - name: Install E2E dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: pnpm install --frozen-lockfile --ignore-scripts --filter-prod '@portfolio/e2e...'
+
+      - name: Check installed packages
+        run: |
+          set -euo pipefail
+          if ! find node_modules/.pnpm -mindepth 1 -maxdepth 1 -type d -name 'playwright-core@*' | grep -q .; then
+            echo "::error::playwright-core was not found in node_modules/.pnpm"
+            exit 1
+          fi
+          found="$(find node_modules/.pnpm -mindepth 1 -maxdepth 1 \( \
+            -name 'astro@*' -o -name 'esbuild@*' -o -name '@esbuild+*' \
+            -o -name 'sharp@*' -o -name '@img+sharp*' \
+            -o -name 'workerd@*' -o -name '@cloudflare+workerd*' -o -name 'wrangler@*' \) -print)"
+          if [ -n "$found" ]; then
+            echo "::error::Packages outside the E2E set were installed:"
+            printf '%s\n' "$found"
+            exit 1
+          fi
+          printf 'Installed packages: %s\n' "$(find node_modules/.pnpm -mindepth 1 -maxdepth 1 -type d ! -name node_modules | wc -l)"
+
+      - name: Run E2E tests
+        env:
+          PREVIEW_URL: ${{ needs.upload-prod.outputs.preview-url }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: pnpm --filter @portfolio/e2e run e2e
 
   deploy-prod:
-    needs: [upload-prod]
+    needs: [upload-prod, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: deploy
@@ -310,6 +420,31 @@ jobs:
           printf 'Rollback target (currently at 100%%): %s\n' "$current"
           printf 'version-id=%s\n' "$current" >> "$GITHUB_OUTPUT"
 
+      - name: Check for a newer deployed run
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version-id }}
+        run: |
+          set -euo pipefail
+          pnpm --silent --dir tools/deployer exec wrangler versions view "$CURRENT_VERSION_ID" \
+            --env prod --config ../../apps/site/wrangler.jsonc --json < /dev/null > "$RUNNER_TEMP/current-version.json"
+          if ! jq -e --arg id "$CURRENT_VERSION_ID" '.id == $id' "$RUNNER_TEMP/current-version.json" > /dev/null; then
+            echo "::error::Could not read the current version from the wrangler output"
+            exit 1
+          fi
+          message="$(jq -r '.annotations["workers/message"] // empty' "$RUNNER_TEMP/current-version.json")"
+          if [[ ! "$message" =~ ^[0-9a-f]{40}-([0-9]{1,18})$ ]]; then
+            echo "::warning::The current version's message is not <sha>-<run_id>; skipping the newer-run check"
+            exit 0
+          fi
+          current_run_id="${BASH_REMATCH[1]}"
+          printf 'Run ID of the current version: %s\n' "$current_run_id"
+          if [ "$current_run_id" -gt "$GITHUB_RUN_ID" ]; then
+            echo "::error::Prod already serves a version from a newer run (${current_run_id}); not deploying run ${GITHUB_RUN_ID}"
+            exit 1
+          fi
+
       - name: Deploy version
         id: deploy
         env:
@@ -361,7 +496,7 @@ jobs:
           echo "::error::Deploy or smoke test did not pass; prod was rolled back to ${ROLLBACK_VERSION_ID}"
 
   report-failure:
-    needs: [build, deploy-beta, upload-prod, deploy-prod]
+    needs: [build, deploy-beta, upload-prod, e2e, deploy-prod]
     if: failure() || cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 5

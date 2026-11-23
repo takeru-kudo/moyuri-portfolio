@@ -85,6 +85,9 @@ jobs:
       - name: astro check
         run: pnpm --filter @portfolio/site run check
 
+      - name: E2E typecheck
+        run: pnpm --filter @portfolio/e2e run check
+
       - name: Build site
         run: pnpm --filter @portfolio/site run build
 
