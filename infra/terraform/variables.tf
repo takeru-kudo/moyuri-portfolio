@@ -66,3 +66,14 @@ variable "editor_email" {
 locals {
   zone_name = "moyuri-kudo.com"
 }
+
+variable "site_prod_worker_id" {
+  description = "Immutable ID of the site-prod Worker whose preview URLs are protected by Access."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{32}$", var.site_prod_worker_id))
+    error_message = "site_prod_worker_id must be a 32-character lowercase hex string."
+  }
+}
