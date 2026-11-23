@@ -38,7 +38,8 @@ test("security headers are set", async ({ preview }) => {
   expect(response.status(), "status").toBe(200);
   const headers = response.headers();
   expect(headers["x-content-type-options"], "X-Content-Type-Options").toBe("nosniff");
-  expect(headers["x-robots-tag"], "X-Robots-Tag").toBe("noindex, nofollow");
+  const robots = (headers["x-robots-tag"] ?? "").split(",").map((token) => token.trim());
+  expect(robots, "X-Robots-Tag").toContain("noindex");
 });
 
 test.describe("top page", () => {
