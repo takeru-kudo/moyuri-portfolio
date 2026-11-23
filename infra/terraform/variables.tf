@@ -77,3 +77,19 @@ variable "site_prod_worker_id" {
     error_message = "site_prod_worker_id must be a 32-character lowercase hex string."
   }
 }
+
+variable "hooks_waf_header_value" {
+  description = "Expected x-hook-key header value on the hooks host (K11)."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+/]+={0,2}$", var.hooks_waf_header_value))
+    error_message = "hooks_waf_header_value must be a non-empty base64 string."
+  }
+
+  validation {
+    condition     = length(var.hooks_waf_header_value) >= 32 && length(var.hooks_waf_header_value) <= 128
+    error_message = "hooks_waf_header_value must be 32 to 128 characters long."
+  }
+}
