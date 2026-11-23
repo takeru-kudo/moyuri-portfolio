@@ -103,6 +103,12 @@ jobs:
       - name: hooks-relay tests
         run: pnpm --filter @portfolio/hooks-relay run test
 
+      - name: csp-report typecheck
+        run: pnpm --filter @portfolio/csp-report run check
+
+      - name: csp-report tests
+        run: pnpm --filter @portfolio/csp-report run test
+
       - name: Build site
         run: pnpm --filter @portfolio/site run build
 
