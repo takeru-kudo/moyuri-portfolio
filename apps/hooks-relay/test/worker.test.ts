@@ -109,6 +109,25 @@ describe("signature", () => {
     expect(res.status).toBe(401);
   });
 
+  it("logs signature shape and secret length, not their values, on 401", async () => {
+    const logSpy = vi.spyOn(console, "log");
+    const wrong = "a".repeat(64);
+    await send(await signedRequest(payload, wrong));
+    await send(await signedRequest(payload, null));
+    const lines = logSpy.mock.calls.map((c) => String(c[0]));
+    expect(lines.join("\n")).not.toContain(wrong);
+    expect(lines.join("\n")).not.toContain("test-webhook-secret");
+    const [withSig, withoutSig] = lines.map((l) => JSON.parse(l));
+    expect(withSig).toMatchObject({
+      outcome: "bad_signature",
+      sig_present: true,
+      sig_length: 64,
+      sig_hex64: true,
+      secret_length: "test-webhook-secret".length,
+    });
+    expect(withoutSig).toMatchObject({ sig_present: false, sig_length: 0, sig_hex64: false });
+  });
+
   it("401 when the body differs from the signed one", async () => {
     const res = await send(await signedRequest(`${payload} `, await sign(payload)));
     expect(res.status).toBe(401);
