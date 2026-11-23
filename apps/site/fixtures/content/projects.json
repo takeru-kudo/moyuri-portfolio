@@ -1,0 +1,51 @@
+{
+  "contents": [
+    {
+      "id": "fixture-project-1",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "publishedAt": "2026-01-01T00:00:00.000Z",
+      "revisedAt": "2026-01-01T00:00:00.000Z",
+      "title": "サンプル作品 1",
+      "slug": "sample-1",
+      "cover": {
+        "url": "https://images.microcms-assets.io/assets/fixture/sample-1.png",
+        "width": 1200,
+        "height": 800
+      },
+      "summary": "フィクスチャの作品です。",
+      "body": "<p>フィクスチャの本文です。</p>",
+      "category": {
+        "id": "fixture-category-1",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z",
+        "publishedAt": "2026-01-01T00:00:00.000Z",
+        "revisedAt": "2026-01-01T00:00:00.000Z",
+        "name": "サンプル",
+        "slug": "sample"
+      },
+      "order": 1,
+      "featured": true
+    },
+    {
+      "id": "fixture-project-2",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "publishedAt": "2026-01-01T00:00:00.000Z",
+      "revisedAt": "2026-01-01T00:00:00.000Z",
+      "title": "サンプル作品 2",
+      "slug": "sample-2",
+      "cover": {
+        "url": "https://images.microcms-assets.io/assets/fixture/sample-2.png",
+        "width": 800,
+        "height": 800
+      },
+      "summary": null,
+      "body": null,
+      "category": null,
+      "order": null,
+      "featured": false
+    }
+  ],
+  "totalCount": 2
+}

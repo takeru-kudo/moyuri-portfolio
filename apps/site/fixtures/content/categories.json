@@ -1,0 +1,14 @@
+{
+  "contents": [
+    {
+      "id": "fixture-category-1",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z",
+      "publishedAt": "2026-01-01T00:00:00.000Z",
+      "revisedAt": "2026-01-01T00:00:00.000Z",
+      "name": "サンプル",
+      "slug": "sample"
+    }
+  ],
+  "totalCount": 1
+}

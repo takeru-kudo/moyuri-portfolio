@@ -6,13 +6,16 @@
     "dev": "astro dev",
     "build": "astro build",
     "check": "astro check",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "test": "node --test \"src/**/*.test.ts\""
   },
   "dependencies": {
+    "@portfolio/content-schema": "workspace:*",
     "astro": "7.4.7"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",
+    "@types/node": "26.6.6",
     "typescript": "6.0.3"
   }
 }

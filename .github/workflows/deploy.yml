@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths-ignore:
       - "infra/**"
+  schedule:
+    - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
       target:
@@ -34,12 +36,11 @@ env:
   FORCE_COLOR: "0"
 
 jobs:
-  build:
+  prepare:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
+    timeout-minutes: 5
+    permissions: {}
     outputs:
       target: ${{ steps.inputs.outputs.target }}
     steps:
@@ -66,6 +67,165 @@ jobs:
           printf 'target: %s\n' "$target"
           printf 'target=%s\n' "$target" >> "$GITHUB_OUTPUT"
 
+  fetch-published:
+    needs: [prepare]
+    if: needs.prepare.outputs.target == 'prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: content
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Fetch published content
+        env:
+          MICROCMS_SERVICE_ID: ${{ vars.MICROCMS_SERVICE_ID }}
+          MICROCMS_API_KEY_PUBLISHED: ${{ secrets.MICROCMS_API_KEY_PUBLISHED }}
+        run: |
+          set -euo pipefail
+          node tools/fetch-content/fetch.mjs --mode published --out "$RUNNER_TEMP/content-published"
+          for endpoint in profile site; do
+            if [ "$(tr -d '[:space:]' < "$RUNNER_TEMP/content-published/${endpoint}.json")" = "null" ]; then
+              echo "::warning::The ${endpoint} API returned 404; building without it"
+            fi
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: content-published
+          path: ${{ runner.temp }}/content-published/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload nightly backup
+        if: github.event_name == 'schedule'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: content-published-backup
+          path: ${{ runner.temp }}/content-published/
+          if-no-files-found: error
+          retention-days: 14
+
+  fetch-draft:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: content-draft
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Fetch draft content
+        env:
+          MICROCMS_SERVICE_ID: ${{ vars.MICROCMS_SERVICE_ID }}
+          MICROCMS_API_KEY_DRAFT: ${{ secrets.MICROCMS_API_KEY_DRAFT }}
+        run: |
+          set -euo pipefail
+          node tools/fetch-content/fetch.mjs --mode draft --out "$RUNNER_TEMP/content-draft"
+          for endpoint in profile site; do
+            if [ "$(tr -d '[:space:]' < "$RUNNER_TEMP/content-draft/${endpoint}.json")" = "null" ]; then
+              echo "::warning::The ${endpoint} API returned 404; building without it"
+            fi
+          done
+
+      - name: Encrypt draft content
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          tar -C "$RUNNER_TEMP" -cf "$RUNNER_TEMP/content-draft.tar" content-draft
+          mkdir "$RUNNER_TEMP/encrypted"
+          node tools/draft-crypto/crypt.mjs encrypt \
+            --in "$RUNNER_TEMP/content-draft.tar" --out "$RUNNER_TEMP/encrypted/content-draft.tar.enc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: content-draft-encrypted
+          path: ${{ runner.temp }}/encrypted/content-draft.tar.enc
+          if-no-files-found: error
+          retention-days: 1
+
+  build-prod:
+    needs: [prepare, fetch-published]
+    if: needs.prepare.outputs.target == 'prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: content-published
+          path: ${{ runner.temp }}/content-published/
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pnpm-bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/pnpm-bin"
+          printf '%s\n' "$RUNNER_TEMP/pnpm-bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build site
+        env:
+          CONTENT_DIR: ${{ runner.temp }}/content-published
+          CONTENT_MODE: published
+        run: pnpm --filter @portfolio/site run build
+
+      - name: Write version.txt
+        run: printf '%s-%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > apps/site/dist/version.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site-dist
+          path: apps/site/dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  build-beta:
+    needs: [prepare, fetch-draft]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: draft
+    permissions:
+      contents: read
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -94,21 +254,57 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build site
-        run: pnpm --filter @portfolio/site run build
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: content-draft-encrypted
+          path: ${{ runner.temp }}/encrypted/
 
-      - name: Write version.txt
-        run: printf '%s-%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > apps/site/dist/version.txt
+      - name: Decrypt draft content
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          node tools/draft-crypto/crypt.mjs decrypt \
+            --in "$RUNNER_TEMP/encrypted/content-draft.tar.enc" --out "$RUNNER_TEMP/content-draft.tar"
+          mkdir "$RUNNER_TEMP/content"
+          tar -C "$RUNNER_TEMP/content" --no-same-owner -xf "$RUNNER_TEMP/content-draft.tar"
+          rm -f "$RUNNER_TEMP/content-draft.tar"
+
+      - name: Build site
+        working-directory: apps/site
+        env:
+          CONTENT_DIR: ${{ runner.temp }}/content/content-draft
+          CONTENT_MODE: draft
+        run: |
+          set -euo pipefail
+          pnpm exec astro build --silent
+          printf '%s-%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/version.txt
+          printf 'Pages built: %s\n' "$(find dist -type f -name '*.html' | wc -l)"
+          if [ ! -f dist/projects/draft-canary/index.html ]; then
+            echo "::error::The draft canary page (draft-canary) is missing from the Beta build"
+            exit 1
+          fi
+          echo "Draft canary page: present"
+
+      - name: Encrypt site
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          tar -C apps/site -cf "$RUNNER_TEMP/site-beta.tar" dist
+          mkdir "$RUNNER_TEMP/encrypted-site"
+          node tools/draft-crypto/crypt.mjs encrypt \
+            --in "$RUNNER_TEMP/site-beta.tar" --out "$RUNNER_TEMP/encrypted-site/site-beta.tar.enc"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: site-dist
-          path: apps/site/dist/
+          name: site-beta-encrypted
+          path: ${{ runner.temp }}/encrypted-site/site-beta.tar.enc
           if-no-files-found: error
           retention-days: 1
 
   deploy-beta:
-    needs: [build]
+    needs: [prepare, build-beta]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: deploy
@@ -121,11 +317,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: site-dist
-          path: apps/site/dist/
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -151,9 +342,30 @@ jobs:
       - name: Install deployer
         run: pnpm --dir tools/deployer install --frozen-lockfile
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site-beta-encrypted
+          path: ${{ runner.temp }}/encrypted-site/
+
+      - name: Decrypt site
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          node tools/draft-crypto/crypt.mjs decrypt \
+            --in "$RUNNER_TEMP/encrypted-site/site-beta.tar.enc" --out "$RUNNER_TEMP/site-beta.tar"
+          mkdir "$RUNNER_TEMP/site-beta"
+          tar -C "$RUNNER_TEMP/site-beta" --no-same-owner -xf "$RUNNER_TEMP/site-beta.tar"
+          rm -f "$RUNNER_TEMP/site-beta.tar"
+          if [ ! -f "$RUNNER_TEMP/site-beta/dist/index.html" ]; then
+            echo "::error::The decrypted Beta site has no index.html"
+            exit 1
+          fi
+
       - name: Upload version
         id: upload
         env:
+          WRANGLER_LOG: warn
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-upload.ndjson
@@ -161,6 +373,7 @@ jobs:
           set -euo pipefail
           pnpm --dir tools/deployer exec wrangler versions upload \
             --env beta --config ../../apps/site/wrangler.jsonc \
+            --assets "$RUNNER_TEMP/site-beta/dist" \
             --message "${GITHUB_SHA}-${GITHUB_RUN_ID}" < /dev/null
           version_id="$(jq -r 'select(.type == "version-upload") | .version_id // empty' "$WRANGLER_OUTPUT_FILE_PATH" | tail -n 1)"
           if ! printf '%s' "$version_id" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'; then
@@ -182,8 +395,8 @@ jobs:
             --message "${GITHUB_SHA}-${GITHUB_RUN_ID}" --yes < /dev/null
 
   upload-prod:
-    needs: [build, deploy-beta]
-    if: needs.build.outputs.target == 'prod'
+    needs: [prepare, build-prod, deploy-beta]
+    if: needs.prepare.outputs.target == 'prod'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: deploy
@@ -496,7 +709,7 @@ jobs:
           echo "::error::Deploy or smoke test did not pass; prod was rolled back to ${ROLLBACK_VERSION_ID}"
 
   report-failure:
-    needs: [build, deploy-beta, upload-prod, e2e, deploy-prod]
+    needs: [prepare, fetch-published, fetch-draft, build-prod, build-beta, deploy-beta, upload-prod, e2e, deploy-prod]
     if: failure() || cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 5
