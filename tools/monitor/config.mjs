@@ -63,7 +63,7 @@ export const CSP_DIRECTIVES = [
 export const CSP_HASH_DIRECTIVES = ["script-src", "style-src"];
 
 /** Hosts whose TLS certificate expiry is checked. */
-export const TLS_HOSTS = [ZONE, `www.${ZONE}`, `beta.${ZONE}`, `hooks.${ZONE}`];
+export const TLS_HOSTS = [ZONE, `www.${ZONE}`, `beta.${ZONE}`, `hooks.${ZONE}`, `status.${ZONE}`];
 
 /** CAA issuers from infra/terraform/dns.tf (local.caa_issuers), each published as issue and issuewild. */
 export const CAA_ISSUERS = ["letsencrypt.org", "pki.goog; cansignhttpexchanges=yes", "ssl.com"];
@@ -96,6 +96,7 @@ export const CT_HOSTNAMES = [
   `csp.${ZONE}`,
   `*.csp.${ZONE}`,
   `media.${ZONE}`,
+  `status.${ZONE}`,
 ];
 
 /** Workers whose workers.dev route must be disabled: [name, probed path, may be absent]. */

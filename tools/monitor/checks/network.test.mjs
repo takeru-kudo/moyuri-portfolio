@@ -25,7 +25,7 @@ test("tls: fails under 14 days and on connection errors", async () => {
     return { validTo: days(80) };
   };
   const results = await runTls(makeCtx({ tlsConnect }));
-  assert.deepEqual(statuses(results), ["PASS", "FAIL", "FAIL", "PASS"]);
+  assert.deepEqual(statuses(results), TLS_HOSTS.map((_, i) => (i === 1 || i === 2 ? "FAIL" : "PASS")));
   assert.equal(results[1].detail, "13 day(s) left");
   assert.equal(results[2].detail, "Error (CERT_HAS_EXPIRED)");
 });
