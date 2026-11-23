@@ -1,0 +1,314 @@
+name: deploy-beta-manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch name or full 40-character commit SHA contained in a branch
+        type: string
+        required: true
+
+permissions: {}
+
+env:
+  PNPM_VERSION: 12.17.0
+  PNPM_SHA256: 2c58959fd5df5cb9f4e72784c08a60ffc7ee558fed9b04b22254e29112203a51
+  WRANGLER_SEND_METRICS: "false"
+  FORCE_COLOR: "0"
+
+jobs:
+  resolve-ref:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Validate ref
+        id: resolve
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            git cat-file -e "${REF}^{commit}" 2> /dev/null || fail "The commit is not in any branch of this repository"
+            if [ -z "$(git branch -r --contains "$REF" 2> /dev/null)" ]; then
+              fail "The commit is not in any branch of this repository"
+            fi
+            sha="$REF"
+          else
+            branch="${REF#refs/heads/}"
+            if [[ ! "$branch" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || [[ "$branch" == -* ]] \
+              || [[ "$branch" == refs/* ]] || [ "$branch" = "HEAD" ]; then
+              fail "ref must be a branch name or a full 40-character commit SHA"
+            fi
+            git check-ref-format --branch "$branch" > /dev/null 2>&1 || fail "ref is not a valid branch name"
+            sha="$(git rev-parse --verify --quiet "refs/remotes/origin/${branch}^{commit}")" \
+              || fail "ref is not a branch of this repository"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            fail "Could not resolve ref to a commit SHA"
+          fi
+          printf 'Resolved commit: %s\n' "$sha"
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+  fetch-draft:
+    needs: [resolve-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: content-draft
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Fetch draft content
+        env:
+          MICROCMS_SERVICE_ID: ${{ vars.MICROCMS_SERVICE_ID }}
+          MICROCMS_API_KEY_DRAFT: ${{ secrets.MICROCMS_API_KEY_DRAFT }}
+        run: |
+          set -euo pipefail
+          node tools/fetch-content/fetch.mjs --mode draft --out "$RUNNER_TEMP/content-draft"
+          for endpoint in profile site; do
+            if [ "$(tr -d '[:space:]' < "$RUNNER_TEMP/content-draft/${endpoint}.json")" = "null" ]; then
+              echo "::warning::The ${endpoint} API returned 404; building without it"
+            fi
+          done
+
+      - name: Encrypt draft content
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          tar -C "$RUNNER_TEMP" -cf "$RUNNER_TEMP/content-draft.tar" content-draft
+          mkdir "$RUNNER_TEMP/encrypted"
+          node tools/draft-crypto/crypt.mjs encrypt \
+            --in "$RUNNER_TEMP/content-draft.tar" --out "$RUNNER_TEMP/encrypted/content-draft.tar.enc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: content-draft-encrypted
+          path: ${{ runner.temp }}/encrypted/content-draft.tar.enc
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: [resolve-ref, fetch-draft]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: draft
+    permissions:
+      contents: read
+    steps:
+      - name: Check resolved commit
+        env:
+          SOURCE_SHA: ${{ needs.resolve-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::resolve-ref did not provide a commit SHA"
+            exit 1
+          fi
+
+      - name: Check out main tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: main
+
+      - name: Check out the requested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-ref.outputs.sha }}
+          path: source
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: source/.mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/source/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pnpm-bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/pnpm-bin"
+          printf '%s\n' "$RUNNER_TEMP/pnpm-bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: content-draft-encrypted
+          path: ${{ runner.temp }}/encrypted/
+
+      - name: Decrypt draft content
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          node main/tools/draft-crypto/crypt.mjs decrypt \
+            --in "$RUNNER_TEMP/encrypted/content-draft.tar.enc" --out "$RUNNER_TEMP/content-draft.tar"
+          mkdir "$RUNNER_TEMP/content"
+          tar -C "$RUNNER_TEMP/content" --no-same-owner -xf "$RUNNER_TEMP/content-draft.tar"
+          rm -f "$RUNNER_TEMP/content-draft.tar"
+
+      - name: Build site
+        working-directory: source/apps/site
+        env:
+          CONTENT_DIR: ${{ runner.temp }}/content/content-draft
+          CONTENT_MODE: draft
+          SOURCE_SHA: ${{ needs.resolve-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          pnpm exec astro build --silent
+          printf '%s-%s\n' "$SOURCE_SHA" "$GITHUB_RUN_ID" > dist/version.txt
+          printf 'Pages built: %s\n' "$(find dist -type f -name '*.html' | wc -l)"
+          if [ ! -f dist/projects/draft-canary/index.html ]; then
+            echo "::error::The draft canary page (draft-canary) is missing from the Beta build"
+            exit 1
+          fi
+          echo "Draft canary page: present"
+
+      - name: Encrypt site
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          tar -C source/apps/site -cf "$RUNNER_TEMP/site-beta.tar" dist
+          mkdir "$RUNNER_TEMP/encrypted-site"
+          node main/tools/draft-crypto/crypt.mjs encrypt \
+            --in "$RUNNER_TEMP/site-beta.tar" --out "$RUNNER_TEMP/encrypted-site/site-beta.tar.enc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site-beta-encrypted
+          path: ${{ runner.temp }}/encrypted-site/site-beta.tar.enc
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: [resolve-ref, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: deploy
+    concurrency:
+      group: deploy-beta
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pnpm-bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/pnpm-bin"
+          printf '%s\n' "$RUNNER_TEMP/pnpm-bin" >> "$GITHUB_PATH"
+
+      - name: Install deployer
+        run: pnpm --dir tools/deployer install --frozen-lockfile
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site-beta-encrypted
+          path: ${{ runner.temp }}/encrypted-site/
+
+      - name: Decrypt site
+        env:
+          DRAFT_ARTIFACT_KEY: ${{ secrets.DRAFT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          node tools/draft-crypto/crypt.mjs decrypt \
+            --in "$RUNNER_TEMP/encrypted-site/site-beta.tar.enc" --out "$RUNNER_TEMP/site-beta.tar"
+          mkdir "$RUNNER_TEMP/site-beta"
+          tar -C "$RUNNER_TEMP/site-beta" --no-same-owner -xf "$RUNNER_TEMP/site-beta.tar"
+          rm -f "$RUNNER_TEMP/site-beta.tar"
+          if [ ! -f "$RUNNER_TEMP/site-beta/dist/index.html" ]; then
+            echo "::error::The decrypted Beta site has no index.html"
+            exit 1
+          fi
+
+      - name: Upload version
+        id: upload
+        env:
+          WRANGLER_LOG: warn
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-upload.ndjson
+          SOURCE_SHA: ${{ needs.resolve-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::resolve-ref did not provide a commit SHA"
+            exit 1
+          fi
+          pnpm --dir tools/deployer exec wrangler versions upload \
+            --env beta --config ../../apps/site/wrangler.jsonc \
+            --assets "$RUNNER_TEMP/site-beta/dist" \
+            --message "${SOURCE_SHA}-${GITHUB_RUN_ID}" < /dev/null
+          version_id="$(jq -r 'select(.type == "version-upload") | .version_id // empty' "$WRANGLER_OUTPUT_FILE_PATH" | tail -n 1)"
+          if ! printf '%s' "$version_id" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'; then
+            echo "::error::Could not read a valid version ID from the wrangler output"
+            exit 1
+          fi
+          printf 'Uploaded beta version: %s\n' "$version_id"
+          printf 'version-id=%s\n' "$version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VERSION_ID: ${{ steps.upload.outputs.version-id }}
+          SOURCE_SHA: ${{ needs.resolve-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          pnpm --dir tools/deployer exec wrangler versions deploy "${VERSION_ID}@100" \
+            --env beta --config ../../apps/site/wrangler.jsonc \
+            --message "${SOURCE_SHA}-${GITHUB_RUN_ID}" --yes < /dev/null

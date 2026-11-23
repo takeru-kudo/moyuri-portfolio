@@ -4,6 +4,8 @@
 // Usage: node tools/fetch-content/fetch.mjs --mode published|draft --out <dir>
 // Env:   MICROCMS_SERVICE_ID, and MICROCMS_API_KEY_PUBLISHED (published) or
 //        MICROCMS_API_KEY_DRAFT (draft)
+// Output: <out>/<endpoint>.json; a list file is { contents, totalCount }, an
+//         object file is the object, or null when its API answered 404.
 
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -92,11 +94,15 @@ function describeRequestError(err) {
   return code ? `${safe(name)} (${safe(code)})` : safe(name);
 }
 
+/** Returned by getJson for a 404 when the caller allows it. */
+export const NOT_FOUND = Symbol("NOT_FOUND");
+
 /**
  * GETs one URL with timeout and bounded retry on 429/5xx.
- * Returns the parsed JSON body, or throws FetchContentError naming only the endpoint.
+ * Returns the parsed JSON body (or NOT_FOUND for a 404 when options.allowNotFound),
+ * or throws FetchContentError naming only the endpoint.
  */
-export async function getJson(url, endpoint, deps) {
+export async function getJson(url, endpoint, deps, options = {}) {
   for (let attempt = 1; ; attempt++) {
     let res;
     try {
@@ -118,6 +124,10 @@ export async function getJson(url, endpoint, deps) {
         }
         throw new FetchContentError(`${endpoint}: response is not valid JSON`);
       }
+    }
+    if (res.status === 404 && options.allowNotFound) {
+      await res.body?.cancel().catch(() => {});
+      return NOT_FOUND;
     }
     const retryable = res.status === 429 || (res.status >= 500 && res.status <= 599);
     await res.body?.cancel().catch(() => {});
@@ -203,9 +213,14 @@ export async function fetchList(endpoint, deps) {
   return { contents: items, totalCount: total };
 }
 
-/** Fetches an object API. */
+/**
+ * Fetches an object API. Returns null when the API answers 404, which microCMS
+ * returns when the object has no content readable with the key.
+ */
 export async function fetchObject(endpoint, deps) {
-  const body = await getJson(buildUrl(deps.serviceId, endpoint, {}), endpoint, deps);
+  const url = buildUrl(deps.serviceId, endpoint, {});
+  const body = await getJson(url, endpoint, deps, { allowNotFound: true });
+  if (body === NOT_FOUND) return null;
   if (!isPlainObject(body)) {
     throw new FetchContentError(`${endpoint}: response is not an object`);
   }
@@ -214,6 +229,7 @@ export async function fetchObject(endpoint, deps) {
 
 /** Fails if published-mode data contains content that is not published. */
 export function assertPublished(endpoint, kind, data) {
+  if (data === null) return;
   const roots = kind === "list" ? data.contents : [data];
   let unpublished = 0;
   for (const root of roots) unpublished += countUnpublished(root);
@@ -252,7 +268,7 @@ export async function run({ mode, out, env, fetchImpl, sleep, log, timeoutMs }) 
     await writeFile(path.join(out, `${name}.json`), `${JSON.stringify(data, null, 2)}\n`, {
       mode: 0o600,
     });
-    log(kind === "list" ? `${name}: ${data.contents.length} items` : `${name}: 1 object`);
+    log(kind === "list" ? `${name}: ${data.contents.length} items` : `${name}: ${data === null ? "no content (404)" : "1 object"}`);
   }
 }
 

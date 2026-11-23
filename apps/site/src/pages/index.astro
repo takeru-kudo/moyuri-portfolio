@@ -1,19 +1,31 @@
 ---
+import Base from "../layouts/Base.astro";
+import { getSiteContent } from "../lib/load.ts";
+
+const { projects, site } = await getSiteContent();
+const tagline = site?.tagline?.trim() || null;
 ---
 
-<!doctype html>
-<html lang="ja">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex, nofollow" />
-    <title>Moyuri Kudo</title>
-  </head>
-  <body>
-    <main>
-      <h1>Moyuri Kudo</h1>
-      <p>準備中です。</p>
-      <p lang="en">Portfolio coming soon.</p>
-    </main>
-  </body>
-</html>
+<Base title="Moyuri Kudo">
+  <h1>Moyuri Kudo</h1>
+  {tagline && <p>{tagline}</p>}
+  {
+    projects.length === 0 ? (
+      <>
+        <p>準備中です。</p>
+        <p lang="en">Portfolio coming soon.</p>
+      </>
+    ) : (
+      <section aria-labelledby="projects-heading">
+        <h2 id="projects-heading">Projects</h2>
+        <ul>
+          {projects.map((project) => (
+            <li>
+              <a href={`/projects/${project.slug}/`}>{project.title}</a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )
+  }
+</Base>

@@ -1,0 +1,33 @@
+---
+import type { GetStaticPaths } from "astro";
+import type { Project } from "@portfolio/content-schema";
+import Base from "../../layouts/Base.astro";
+import { getSiteContent } from "../../lib/load.ts";
+
+interface Props {
+  project: Project;
+}
+
+export const getStaticPaths = (async () => {
+  const { projects } = await getSiteContent();
+  return projects.map((project) => ({ params: { slug: project.slug }, props: { project } }));
+}) satisfies GetStaticPaths;
+
+const { project } = Astro.props;
+const summary = project.summary?.trim() || null;
+const body = project.body?.trim() || null;
+---
+
+<Base title={`${project.title} | Moyuri Kudo`}>
+  <p><a href="/">Moyuri Kudo</a></p>
+  <h1>{project.title}</h1>
+  <img
+    src={project.cover.url}
+    alt={project.cover.alt ?? ""}
+    width={project.cover.width}
+    height={project.cover.height}
+    decoding="async"
+  />
+  {summary && <p>{summary}</p>}
+  {body && <div set:html={body} />}
+</Base>

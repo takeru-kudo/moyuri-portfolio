@@ -94,6 +94,9 @@ jobs:
       - name: content-schema tests
         run: pnpm --filter @portfolio/content-schema run test
 
+      - name: site tests
+        run: pnpm --filter @portfolio/site run test
+
       - name: Build site
         run: pnpm --filter @portfolio/site run build
 

@@ -336,19 +336,51 @@ describe("run", () => {
   });
 
   it("does not retry other 4xx", async () => {
-    for (const status of [400, 401, 403, 404]) {
+    for (const [endpoint, status] of [
+      ["profile", 400],
+      ["profile", 401],
+      ["profile", 403],
+      ["projects", 404],
+      ["categories", 404],
+    ]) {
       let n = 0;
       const r = await runWith({
         hooks: (ep) => {
-          if (ep !== "profile") return undefined;
+          if (ep !== endpoint) return undefined;
           n += 1;
           return jsonResponse(status, { message: SECRET_TITLE });
         },
       });
       assert.equal(n, 1);
-      assert.equal(r.error.message, `profile: HTTP ${status}`);
+      assert.equal(r.error.message, `${endpoint}: HTTP ${status}`);
       assert.deepEqual(r.sleeps, []);
     }
+  });
+
+  it("writes null for an object API that answers 404, in both modes", async () => {
+    for (const [mode, env] of [
+      ["published", ENV_PUBLISHED],
+      ["draft", ENV_DRAFT],
+    ]) {
+      const r = await runWith({ mode, env, data: baseData({ profile: undefined, site: undefined }) });
+      assert.equal(r.error, undefined);
+      for (const f of ["profile.json", "site.json"]) {
+        assert.equal(await readFile(path.join(r.out, f), "utf8"), "null\n");
+      }
+      assert.deepEqual(r.logs.slice(2), ["profile: no content (404)", "site: no content (404)"]);
+      assert.equal(r.calls.length, 4);
+      assert.deepEqual(r.sleeps, []);
+    }
+  });
+
+  it("builds an empty result when nothing is published", async () => {
+    const r = await runWith({
+      data: { categories: [], projects: [], profile: undefined, site: undefined },
+    });
+    assert.equal(r.error, undefined);
+    const projects = JSON.parse(await readFile(path.join(r.out, "projects.json"), "utf8"));
+    assert.deepEqual(projects, { contents: [], totalCount: 0 });
+    assert.equal(JSON.parse(await readFile(path.join(r.out, "site.json"), "utf8")), null);
   });
 
   it("reports network errors by name only", async () => {

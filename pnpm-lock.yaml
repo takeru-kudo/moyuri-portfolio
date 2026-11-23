@@ -168,6 +168,9 @@ importers:
 
   apps/site:
     dependencies:
+      '@portfolio/content-schema':
+        specifier: workspace:*
+        version: link:../../packages/content-schema
       astro:
         specifier: 7.4.7
         version: 7.4.7(@types/node@26.6.6)(yaml@2.9.1)
@@ -175,6 +178,9 @@ importers:
       '@astrojs/check':
         specifier: 0.9.12
         version: 0.9.12(prettier@3.10.1)(typescript@6.0.3)
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
       typescript:
         specifier: 6.0.3
         version: 6.0.3
