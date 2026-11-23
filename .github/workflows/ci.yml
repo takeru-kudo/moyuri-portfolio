@@ -176,3 +176,6 @@ jobs:
 
       - name: draft-crypto tests
         run: node --test tools/draft-crypto/crypt.test.mjs
+
+      - name: monitor tests
+        run: node --test tools/monitor/
