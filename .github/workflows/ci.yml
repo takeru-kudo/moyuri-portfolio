@@ -88,6 +88,12 @@ jobs:
       - name: E2E typecheck
         run: pnpm --filter @portfolio/e2e run check
 
+      - name: content-schema typecheck
+        run: pnpm --filter @portfolio/content-schema run check
+
+      - name: content-schema tests
+        run: pnpm --filter @portfolio/content-schema run test
+
       - name: Build site
         run: pnpm --filter @portfolio/site run build
 
@@ -155,3 +161,9 @@ jobs:
 
       - name: Deployer tests
         run: node --test tools/deployer/smoke.test.mjs
+
+      - name: fetch-content tests
+        run: node --test tools/fetch-content/fetch.test.mjs
+
+      - name: draft-crypto tests
+        run: node --test tools/draft-crypto/crypt.test.mjs
