@@ -46,13 +46,19 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
     log({ event: "webhook", outcome: body.reason, status });
     return json(status, { error: body.reason });
   }
-  const signatureOk = await verifySignature(
-    env.MICROCMS_WEBHOOK_SECRET ?? "",
-    body.bytes,
-    request.headers.get("x-microcms-signature"),
-  );
+  const signature = request.headers.get("x-microcms-signature");
+  const secret = env.MICROCMS_WEBHOOK_SECRET ?? "";
+  const signatureOk = await verifySignature(secret, body.bytes, signature);
   if (!signatureOk) {
-    log({ event: "webhook", outcome: "bad_signature", status: 401 });
+    log({
+      event: "webhook",
+      outcome: "bad_signature",
+      status: 401,
+      sig_present: signature !== null,
+      sig_length: signature?.length ?? 0,
+      sig_hex64: signature !== null && /^[0-9a-f]{64}$/i.test(signature),
+      secret_length: secret.length,
+    });
     return json(401, { error: "unauthorized" });
   }
 
