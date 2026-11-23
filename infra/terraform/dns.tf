@@ -73,3 +73,13 @@ resource "cloudflare_dns_record" "caa" {
     value = each.value.value
   }
 }
+
+# Better Stack status page on status.moyuri-kudo.com.
+resource "cloudflare_dns_record" "status" {
+  zone_id = var.zone_id
+  name    = "status.${local.zone_name}"
+  type    = "CNAME"
+  content = "statuspage.betteruptime.com"
+  proxied = false
+  ttl     = 1
+}
