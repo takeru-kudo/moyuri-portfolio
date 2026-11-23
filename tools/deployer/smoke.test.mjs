@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  CSP_HEADER,
   EXIT_FAIL,
   EXIT_HSTS_ONLY,
   EXIT_OK,
@@ -21,8 +22,10 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const RUN_ID = "987654321";
 const VERSION = `${SHA}-${RUN_ID}`;
 const ENV = { GITHUB_SHA: SHA, GITHUB_RUN_ID: RUN_ID };
+const CSP = "default-src 'none'; script-src 'self'; report-to csp";
 const GOOD_HEADERS = {
   "x-content-type-options": "nosniff",
+  "content-security-policy-report-only": CSP,
   "strict-transport-security": "max-age=300",
 };
 const GOOD_BODY = "<html><title>Moyuri Kudo</title></html>";
@@ -90,7 +93,7 @@ describe("parseHstsMaxAge", () => {
 });
 
 describe("checkHeaders", () => {
-  const h = (obj) => new Headers(obj);
+  const h = (obj) => new Headers(Object.entries(obj).filter(([, v]) => v !== undefined));
 
   it("passes the baseline", () => {
     assert.deepEqual(checkHeaders(h(GOOD_HEADERS)), []);
@@ -101,7 +104,7 @@ describe("checkHeaders", () => {
   });
 
   it("fails a missing nosniff as a non-HSTS failure", () => {
-    const f = checkHeaders(h({ "strict-transport-security": "max-age=300" }));
+    const f = checkHeaders(h({ ...GOOD_HEADERS, "x-content-type-options": undefined }));
     assert.deepEqual(f.map((x) => x.kind), ["header"]);
   });
 
@@ -111,8 +114,30 @@ describe("checkHeaders", () => {
   });
 
   it("fails a missing HSTS header as an HSTS failure", () => {
-    const f = checkHeaders(h({ "x-content-type-options": "nosniff" }));
+    const f = checkHeaders(h({ ...GOOD_HEADERS, "strict-transport-security": undefined }));
     assert.deepEqual(f.map((x) => x.kind), ["hsts"]);
+  });
+
+  it("accepts the Report-Only CSP with extra whitespace and case", () => {
+    const csp = "  DEFAULT-SRC   'none' ; script-src 'self'";
+    assert.deepEqual(checkHeaders(h({ ...GOOD_HEADERS, [CSP_HEADER]: csp })), []);
+  });
+
+  it("fails a missing Report-Only CSP as a non-HSTS failure", () => {
+    const f = checkHeaders(h({ ...GOOD_HEADERS, [CSP_HEADER]: undefined }));
+    assert.deepEqual(f.map((x) => x.kind), ["header"]);
+  });
+
+  it("fails a Report-Only CSP without default-src 'none'", () => {
+    for (const csp of ["", "default-src 'self'", "script-src 'none'", "default-src 'none' 'self'"]) {
+      const f = checkHeaders(h({ ...GOOD_HEADERS, [CSP_HEADER]: csp }));
+      assert.deepEqual(f.map((x) => x.kind), ["header"], csp);
+    }
+  });
+
+  it("does not accept an enforcing CSP in place of Report-Only", () => {
+    const f = checkHeaders(h({ ...GOOD_HEADERS, [CSP_HEADER]: undefined, "content-security-policy": CSP }));
+    assert.deepEqual(f.map((x) => x.kind), ["header"]);
   });
 
   it(`fails max-age below ${HSTS_MIN_MAX_AGE}`, () => {
@@ -265,7 +290,7 @@ describe("run", () => {
   it("returns HSTS_ONLY when only HSTS fails", async () => {
     const { impl } = fakeFetch({
       versions: [VERSION],
-      home: () => response(200, GOOD_BODY, { "x-content-type-options": "nosniff", "strict-transport-security": "max-age=60" }),
+      home: () => response(200, GOOD_BODY, { ...GOOD_HEADERS, "strict-transport-security": "max-age=60" }),
     });
     assert.equal(await run({ env: ENV, fetchImpl: impl, ...fakeClock(), log: quiet }), EXIT_HSTS_ONLY);
   });
