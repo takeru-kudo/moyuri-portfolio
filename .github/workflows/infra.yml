@@ -65,6 +65,7 @@ jobs:
           TF_VAR_developer_email: ${{ secrets.ACCESS_DEVELOPER_EMAIL }}
           TF_VAR_editor_email: ${{ secrets.ACCESS_EDITOR_EMAIL }}
           TF_VAR_site_prod_worker_id: ${{ secrets.SITE_PROD_WORKER_ID }}
+          TF_VAR_hooks_waf_header_value: ${{ secrets.HOOKS_WAF_HEADER_VALUE }}
         run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/infra.tfplan"
 
       - name: Destroy guard
