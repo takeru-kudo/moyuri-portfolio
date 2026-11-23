@@ -97,6 +97,12 @@ jobs:
       - name: site tests
         run: pnpm --filter @portfolio/site run test
 
+      - name: hooks-relay typecheck
+        run: pnpm --filter @portfolio/hooks-relay run check
+
+      - name: hooks-relay tests
+        run: pnpm --filter @portfolio/hooks-relay run test
+
       - name: Build site
         run: pnpm --filter @portfolio/site run build
 

@@ -1,0 +1,289 @@
+name: deploy-workers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/hooks-relay/**"
+      - "tools/deployer/**"
+      - ".github/workflows/deploy-workers.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  PNPM_VERSION: 12.17.0
+  PNPM_SHA256: 2c58959fd5df5cb9f4e72784c08a60ffc7ee558fed9b04b22254e29112203a51
+  WRANGLER_SEND_METRICS: "false"
+  FORCE_COLOR: "0"
+
+jobs:
+  build-hooks-relay:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      bundle-sha256: ${{ steps.bundle.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pnpm-bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/pnpm-bin"
+          printf '%s\n' "$RUNNER_TEMP/pnpm-bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: hooks-relay typecheck
+        run: pnpm --filter @portfolio/hooks-relay run check
+
+      - name: hooks-relay tests
+        run: pnpm --filter @portfolio/hooks-relay run test
+
+      - name: Install deployer
+        run: pnpm --dir tools/deployer install --frozen-lockfile
+
+      - name: Bundle Worker
+        id: bundle
+        run: |
+          set -euo pipefail
+          pnpm --dir tools/deployer exec wrangler versions upload --dry-run \
+            --config ../../apps/hooks-relay/wrangler.jsonc \
+            --outdir "$RUNNER_TEMP/hooks-relay-bundle" < /dev/null
+          if [ ! -s "$RUNNER_TEMP/hooks-relay-bundle/index.js" ]; then
+            echo "::error::The bundled Worker (index.js) is missing"
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/hooks-relay-artifact"
+          cp "$RUNNER_TEMP/hooks-relay-bundle/index.js" "$RUNNER_TEMP/hooks-relay-artifact/index.js"
+          sha256="$(sha256sum "$RUNNER_TEMP/hooks-relay-artifact/index.js" | cut -d ' ' -f 1)"
+          printf 'Bundle SHA-256: %s\n' "$sha256"
+          printf 'sha256=%s\n' "$sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hooks-relay-bundle
+          path: ${{ runner.temp }}/hooks-relay-artifact/index.js
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy-hooks-relay:
+    needs: [build-hooks-relay]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: deploy
+    concurrency:
+      group: deploy-hooks-relay
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .mise.toml
+          package-manager-cache: false
+
+      - name: Install pnpm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^pnpm = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/.mise.toml")"
+          if [ "$want" != "$PNPM_VERSION" ]; then
+            echo "::error::.mise.toml pnpm ($want) does not match PNPM_VERSION ($PNPM_VERSION)"
+            exit 1
+          fi
+          tgz=pnpm-linux-x64.tar.gz
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tgz" "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/${tgz}"
+          printf '%s  %s\n' "$PNPM_SHA256" "$tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/pnpm-bin"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/pnpm-bin"
+          printf '%s\n' "$RUNNER_TEMP/pnpm-bin" >> "$GITHUB_PATH"
+
+      - name: Install deployer
+        run: pnpm --dir tools/deployer install --frozen-lockfile
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hooks-relay-bundle
+          path: ${{ runner.temp }}/hooks-relay-bundle/
+
+      - name: Check bundle
+        env:
+          BUNDLE_SHA256: ${{ needs.build-hooks-relay.outputs.bundle-sha256 }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$RUNNER_TEMP/hooks-relay-bundle/index.js" ]; then
+            echo "::error::The downloaded bundle has no index.js"
+            exit 1
+          fi
+          if ! printf '%s' "$BUNDLE_SHA256" | grep -Eqx '[0-9a-f]{64}'; then
+            echo "::error::build-hooks-relay did not provide a valid bundle SHA-256"
+            exit 1
+          fi
+          printf '%s  %s\n' "$BUNDLE_SHA256" "$RUNNER_TEMP/hooks-relay-bundle/index.js" | sha256sum --check --strict
+
+      - name: Read current version
+        id: current
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm --silent --dir tools/deployer exec wrangler deployments status \
+            --config ../../apps/hooks-relay/wrangler.jsonc --json < /dev/null > "$RUNNER_TEMP/deployment-status.json"
+          current="$(jq -r '[.versions[]? | select(.percentage == 100) | .version_id] | if length == 1 then .[0] else empty end' "$RUNNER_TEMP/deployment-status.json")"
+          if ! printf '%s' "$current" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'; then
+            echo "::error::Could not read a single version at 100% from the current deployment"
+            exit 1
+          fi
+          printf 'Rollback target (currently at 100%%): %s\n' "$current"
+          printf 'version-id=%s\n' "$current" >> "$GITHUB_OUTPUT"
+
+      - name: Check for a newer deployed run
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version-id }}
+        run: |
+          set -euo pipefail
+          pnpm --silent --dir tools/deployer exec wrangler versions view "$CURRENT_VERSION_ID" \
+            --config ../../apps/hooks-relay/wrangler.jsonc --json < /dev/null > "$RUNNER_TEMP/current-version.json"
+          if ! jq -e --arg id "$CURRENT_VERSION_ID" '.id == $id' "$RUNNER_TEMP/current-version.json" > /dev/null; then
+            echo "::error::Could not read the current version from the wrangler output"
+            exit 1
+          fi
+          message="$(jq -r '.annotations["workers/message"] // empty' "$RUNNER_TEMP/current-version.json")"
+          if [[ ! "$message" =~ ^[0-9a-f]{40}-([0-9]{1,18})$ ]]; then
+            echo "::warning::The current version's message is not <sha>-<run_id>; skipping the newer-run check"
+            exit 0
+          fi
+          current_run_id="${BASH_REMATCH[1]}"
+          printf 'Run ID of the current version: %s\n' "$current_run_id"
+          if [ "$current_run_id" -gt "$GITHUB_RUN_ID" ]; then
+            echo "::error::hooks-relay already serves a version from a newer run (${current_run_id}); not deploying run ${GITHUB_RUN_ID}"
+            exit 1
+          fi
+
+      - name: Upload version
+        id: upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-upload.ndjson
+        run: |
+          set -euo pipefail
+          pnpm --dir tools/deployer exec wrangler versions upload "$RUNNER_TEMP/hooks-relay-bundle/index.js" \
+            --no-bundle --config ../../apps/hooks-relay/wrangler.jsonc \
+            --message "${GITHUB_SHA}-${GITHUB_RUN_ID}" < /dev/null
+          version_id="$(jq -r 'select(.type == "version-upload") | .version_id // empty' "$WRANGLER_OUTPUT_FILE_PATH" | tail -n 1)"
+          if ! printf '%s' "$version_id" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'; then
+            echo "::error::Could not read a valid version ID from the wrangler output"
+            exit 1
+          fi
+          printf 'Uploaded hooks-relay version: %s\n' "$version_id"
+          printf 'version-id=%s\n' "$version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy version
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          NEW_VERSION_ID: ${{ steps.upload.outputs.version-id }}
+        run: |
+          set -euo pipefail
+          printf 'Deploying hooks-relay version: %s\n' "$NEW_VERSION_ID"
+          pnpm --dir tools/deployer exec wrangler versions deploy "${NEW_VERSION_ID}@100" \
+            --config ../../apps/hooks-relay/wrangler.jsonc \
+            --message "${GITHUB_SHA}-${GITHUB_RUN_ID}" --yes < /dev/null
+
+      - name: Check /healthz
+        id: health
+        timeout-minutes: 7
+        env:
+          NEW_VERSION_ID: ${{ steps.upload.outputs.version-id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 18); do
+            body="$(curl -sS --proto '=https' --max-time 10 -H 'Cache-Control: no-cache' \
+              "https://hooks.moyuri-kudo.com/healthz?deploy=${GITHUB_RUN_ID}-${attempt}" || true)"
+            version="$(printf '%s' "$body" | jq -r 'if type == "object" and .status == "ok" then .version // empty else empty end' 2>/dev/null || true)"
+            printf 'attempt %s: version %s\n' "$attempt" "${version:-(none)}"
+            if [ "$version" = "$NEW_VERSION_ID" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::https://hooks.moyuri-kudo.com/healthz did not report version ${NEW_VERSION_ID}"
+          exit 1
+
+      - name: Roll back
+        if: >-
+          (failure() || cancelled())
+          && steps.current.outcome == 'success'
+          && steps.deploy.outcome != 'skipped'
+          && steps.health.outcome != 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ROLLBACK_VERSION_ID: ${{ steps.current.outputs.version-id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$ROLLBACK_VERSION_ID" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'; then
+            echo "::error::No valid rollback target"
+            exit 1
+          fi
+          printf 'Rolling back hooks-relay to: %s\n' "$ROLLBACK_VERSION_ID"
+          pnpm --dir tools/deployer exec wrangler rollback "$ROLLBACK_VERSION_ID" \
+            --config ../../apps/hooks-relay/wrangler.jsonc \
+            --message "Deploy or health check did not pass in run ${GITHUB_RUN_ID}" --yes < /dev/null
+          echo "::error::Deploy or health check did not pass; hooks-relay was rolled back to ${ROLLBACK_VERSION_ID}"
+
+  report-failure:
+    needs: [build-hooks-relay, deploy-hooks-relay]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create or comment on incident issue
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="Workflow \`${GITHUB_WORKFLOW}\` failed or was cancelled: ${run_url}"
+          gh label create incident --color B60205 --description "Automated failure report" 2>/dev/null || true
+          number="$(gh issue list --label incident --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Workflow failure: ${GITHUB_WORKFLOW}" --label incident --body "$body"
+          fi
